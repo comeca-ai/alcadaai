@@ -1,30 +1,21 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Minus, Plus } from 'lucide-react';
 import { toast } from 'sonner';
 import { cn } from '@/lib/utils';
 import { usePapel } from '@/lib/papel';
 import AlcadaBar from '@/components/AlcadaBar';
-import { criarProposta, fmtBRL, fmtPct, zonaDoDesconto } from '@/lib/api';
+import { trpc } from '@/providers/trpc';
+import { CARGOS_FALLBACK, fmtBRL, fmtPct, QTY_INICIAL, zonaDoDesconto } from '@/lib/api';
+import type { CargoRow } from '@/lib/api';
 
 /**
- * Página Nova Proposta (rotas `/` e `/nova`) — v0 demo funcional.
- * Form (cliente/composição/SLA) → preço da IA no painel escuro →
- * "Fechando o preço" com barra de alçada viva e CTA por zona.
+ * Página Nova Proposta (rotas `/` e `/nova`) — v0 ligado ao backend tRPC.
+ * Cargos: trpc.cargos.list (fallback: seed local se falhar).
+ * Preço: trpc.preco.calcular (server; cálculo local como fallback imediato).
+ * CTA: trpc.propostas.criar com vendedorId=1 (Nizan).
  */
 
-/* ── Seed Vetta Facilities (design-alcada/design.md) ─────────────────── */
-interface CargoSeed {
-  nome: string;
-  detalhe: string;
-  custoMensal: number;
-  qtyInicial: number;
-}
-const CARGOS_SEED: CargoSeed[] = [
-  { nome: 'Técnico de Manutenção', detalhe: 'pleno', custoMensal: 4200, qtyInicial: 2 },
-  { nome: 'Auxiliar de Limpeza', detalhe: '', custoMensal: 2600, qtyInicial: 1 },
-  { nome: 'Aux. Limpeza Crítica (hospitalar)', detalhe: 'esp. · margem 30%', custoMensal: 3400, qtyInicial: 0 },
-  { nome: 'Supervisor de Conta', detalhe: 'sênior', custoMensal: 6800, qtyInicial: 0.5 },
-];
+const VENDEDOR_ID = 1; // Nizan Jhon
 
 const MARGEM_CASA = 0.28; // margem alvo = margem mínima (piso automático)
 const FATOR_URGENCIA = 1.07; // SLA urgente 24h
@@ -43,6 +34,13 @@ const FIELD_INPUT =
   'w-full rounded-xl border border-al-border bg-al-cream px-[14px] py-3 font-sans text-[14.5px] font-bold text-al-ink outline-none focus:border-al-green';
 const FIELD_LABEL =
   'text-[11.5px] font-black uppercase tracking-[.08em] text-al-faint';
+
+/** Subtexto do cargo: "pleno", "esp. · margem 30%", etc. */
+function detalheDo(c: CargoRow): string {
+  const partes = [c.nivel];
+  if (c.margemAlvo !== 28) partes.push(`margem ${c.margemAlvo}%`);
+  return partes.filter(Boolean).join(' · ');
+}
 
 function QtyStepper({
   value,
@@ -79,26 +77,58 @@ function QtyStepper({
 
 export default function NovaProposta() {
   const { nome, iniciais } = usePapel();
+  const utils = trpc.useUtils();
 
   const [cliente, setCliente] = useState('Condomínio Residencial Vista Park');
   const [contato, setContato] = useState('Síndica Márcia · (83) 99988-7766');
   const [escopo, setEscopo] = useState(
     'Manutenção preventiva do condomínio (2 torres, 96 unidades), limpeza das áreas comuns e supervisão mensal com relatório.',
   );
-  const [qtys, setQtys] = useState<number[]>(CARGOS_SEED.map((c) => c.qtyInicial));
+  const [qtyPorCargo, setQtyPorCargo] = useState<Record<number, number>>(() => ({ ...QTY_INICIAL }));
   const [sla, setSla] = useState<'padrao' | 'urgente'>('urgente');
   const [duracao, setDuracao] = useState(12);
   const [motivo, setMotivo] = useState('relacionamento');
-  const [salvando, setSalvando] = useState(false);
 
-  /* ── Preço da IA: custo → piso (custo/(1−margem)) → urgência ── */
-  const custoTotal = useMemo(
-    () => CARGOS_SEED.reduce((acc, c, i) => acc + c.custoMensal * (qtys[i] ?? 0), 0),
-    [qtys],
+  /* ── Cargos: backend (fallback: seed local se falhar) ── */
+  const cargosQ = trpc.cargos.list.useQuery(undefined, { retry: 1 });
+  const cargos: CargoRow[] =
+    cargosQ.data && cargosQ.data.length > 0 ? cargosQ.data : CARGOS_FALLBACK;
+
+  const qtyDe = (id: number) => qtyPorCargo[id] ?? 0;
+  const itens = useMemo(
+    () =>
+      cargos.map((c) => ({
+        cargoId: c.id,
+        nome: c.nome,
+        qty: qtyDe(c.id),
+        custoMensal: c.custoMensal,
+      })),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [cargos, qtyPorCargo],
   );
-  const piso = custoTotal / (1 - MARGEM_CASA);
-  const precoIA = Math.round(piso * (sla === 'urgente' ? FATOR_URGENCIA : 1));
-  const teto = Math.round((precoIA * 1.1) / 100) * 100;
+
+  /* ── Preço da IA: server (preco.calcular) com fallback local imediato ── */
+  const calcMut = trpc.preco.calcular.useMutation();
+  const calcularRef = useRef(calcMut.mutate);
+  calcularRef.current = calcMut.mutate;
+  useEffect(() => {
+    const t = setTimeout(() => calcularRef.current({ itens, sla }), 250);
+    return () => clearTimeout(t);
+  }, [itens, sla]);
+
+  // cálculo local (espelha api/queries/ops.ts) — usado até a mutation voltar ou se falhar
+  const custoLocal = useMemo(
+    () => itens.reduce((s, i) => s + (i.qty > 0 ? Math.round(i.qty * i.custoMensal) : 0), 0),
+    [itens],
+  );
+  const pisoLocal = custoLocal / (1 - MARGEM_CASA);
+  const precoIALocal = Math.round(pisoLocal * (sla === 'urgente' ? FATOR_URGENCIA : 1));
+
+  const server = calcMut.data;
+  const custoTotal = server?.custoTotal ?? custoLocal;
+  const piso = server?.piso ?? pisoLocal;
+  const precoIA = server?.precoIA ?? precoIALocal;
+  const teto = server?.faixaTeto ?? Math.round((precoIALocal * 1.1) / 100) * 100;
 
   const [valorFinal, setValorFinal] = useState<number>(18400);
 
@@ -112,31 +142,39 @@ export default function NovaProposta() {
         ? { rotulo: 'Pedir alçada ao gerente →', cls: 'bg-al-green hover:bg-al-green-hover' }
         : { rotulo: 'Pedir alçada ao diretor →', cls: 'bg-al-red hover:bg-al-red-ink' };
 
-  async function handleCta() {
-    if (salvando) return;
-    setSalvando(true);
-    try {
-      await criarProposta({
-        cliente,
-        contato,
-        escopo,
-        composicao: CARGOS_SEED.map((c, i) => ({
-          nome: c.nome,
-          custoMensal: c.custoMensal,
-          quantidade: qtys[i] ?? 0,
-        })),
-        sla,
-        duracaoMeses: duracao,
-        precoIA,
-        piso: Math.round(piso),
-        valorFinal,
-        descontoPct: Math.round(descontoPct * 10) / 10,
-        motivo,
-        zona,
-      });
-    } finally {
-      setSalvando(false);
-    }
+  /* ── CTA: registra no backend (propostas.criar) ── */
+  const criarMut = trpc.propostas.criar.useMutation({
+    onSuccess: (res) => {
+      utils.propostas.list.invalidate();
+      utils.alcada.pendentes.invalidate();
+      if (res.zona === 'verde') {
+        toast.success('Proposta registrada ✓', {
+          description: `${cliente} · ${fmtBRL(valorFinal)}/mês · dentro da sua alçada.`,
+        });
+      } else {
+        const quem = res.zona === 'amarela' ? 'gerente' : 'diretor';
+        toast.success('Pedido de alçada enviado', {
+          description: `${cliente} · desvio de ${fmtPct(descontoPct)} foi para o ${quem} (painel + WhatsApp).`,
+        });
+      }
+    },
+    onError: (e) =>
+      toast.error('Não foi possível registrar a proposta', { description: e.message }),
+  });
+
+  function handleCta() {
+    if (criarMut.isPending) return;
+    criarMut.mutate({
+      cliente,
+      contato,
+      escopo,
+      sla,
+      duracaoMeses: duracao,
+      itens: itens.filter((i) => i.qty > 0),
+      valorFinal,
+      motivoDesvio: motivo,
+      vendedorId: VENDEDOR_ID,
+    });
   }
 
   return (
@@ -200,24 +238,24 @@ export default function NovaProposta() {
               </span>
             </div>
             <div>
-              {CARGOS_SEED.map((cargo, i) => (
+              {cargos.map((cargo) => (
                 <div
-                  key={cargo.nome}
+                  key={cargo.id}
                   className="grid grid-cols-[1fr_auto_auto] items-center gap-3 border-b border-al-rail py-3 last:border-b-0"
                 >
                   <div className="text-[14.5px] font-black">
                     {cargo.nome}
                     <span className="mt-[1px] block text-[12px] font-bold text-al-faint">
-                      {cargo.detalhe ? `${cargo.detalhe} · ` : ''}custo consolidado{' '}
+                      {detalheDo(cargo) ? `${detalheDo(cargo)} · ` : ''}custo consolidado{' '}
                       {fmtBRL(cargo.custoMensal)}/mês
                     </span>
                   </div>
                   <span className="text-[13px] font-extrabold text-al-muted [font-variant-numeric:tabular-nums]">
-                    {(qtys[i] ?? 0) > 0 ? fmtBRL(cargo.custoMensal * (qtys[i] ?? 0)) : ''}
+                    {qtyDe(cargo.id) > 0 ? fmtBRL(cargo.custoMensal * qtyDe(cargo.id)) : ''}
                   </span>
                   <QtyStepper
-                    value={qtys[i] ?? 0}
-                    onChange={(v) => setQtys((old) => old.map((q, j) => (j === i ? v : q)))}
+                    value={qtyDe(cargo.id)}
+                    onChange={(v) => setQtyPorCargo((old) => ({ ...old, [cargo.id]: v }))}
                   />
                 </div>
               ))}
@@ -322,13 +360,13 @@ export default function NovaProposta() {
               <button
                 type="button"
                 onClick={handleCta}
-                disabled={salvando}
+                disabled={criarMut.isPending}
                 className={cn(
                   'flex-1 cursor-pointer rounded-full px-6 py-[14px] font-sans text-[14.5px] font-black text-white transition-colors disabled:cursor-wait disabled:opacity-70',
                   cta.cls,
                 )}
               >
-                {salvando ? 'Enviando…' : cta.rotulo}
+                {criarMut.isPending ? 'Enviando…' : cta.rotulo}
               </button>
               <button
                 type="button"
@@ -347,12 +385,11 @@ export default function NovaProposta() {
             Preço da IA
           </div>
           <div>
-            {CARGOS_SEED.filter((_, i) => (qtys[i] ?? 0) > 0).map((cargo) => {
-              const i = CARGOS_SEED.indexOf(cargo);
-              const q = qtys[i] ?? 0;
+            {cargos.filter((c) => qtyDe(c.id) > 0).map((cargo) => {
+              const q = qtyDe(cargo.id);
               return (
                 <div
-                  key={cargo.nome}
+                  key={cargo.id}
                   className="flex items-baseline justify-between gap-[10px] border-b border-white/10 pb-[10px] pt-[2px] text-[14px] font-bold text-al-border"
                 >
                   <span>

@@ -83,6 +83,7 @@ export async function criarProposta(input: {
       solicitanteId: input.vendedorId,
       nivel,
       motivo: input.motivoDesvio,
+      justificativa: "",
       status: "pendente",
     });
     await addEvento(propostaId, vend?.nome ?? "vendedor", `pediu alçada ao <b>${nivel}</b> (desvio de ${(desconto / 10).toFixed(1).replace(".", ",")}%)`);
