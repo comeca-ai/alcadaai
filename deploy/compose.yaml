@@ -1,0 +1,64 @@
+# Alçada — compose de deploy no VPS central (padrão INFRA.md)
+# App: app.alcada.ia.br → alcada-web:3000 via Caddy central (rede edge_alcada).
+# SEM "ports:" — entrada só pelo Caddy. Segredos ficam em mysql.env / release.env (gitignored).
+name: alcada
+
+networks:
+  edge_alcada:
+    external: true
+  alcada_internal:
+    internal: false
+
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: alcada-mysql
+    restart: unless-stopped
+    env_file:
+      - mysql.env
+    volumes:
+      - alcada_mysql_data:/var/lib/mysql
+    networks:
+      - alcada_internal
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 300
+    mem_limit: 640m
+    cpus: 0.75
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-p$$MYSQL_ROOT_PASSWORD"]
+      interval: 15s
+      timeout: 5s
+      start_period: 60s
+      retries: 5
+
+  web:
+    image: alcada:${ALCADA_TAG:?defina ALCADA_TAG no release.env}
+    container_name: alcada-web
+    restart: unless-stopped
+    env_file:
+      - release.env
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+    depends_on:
+      mysql:
+        condition: service_healthy
+    networks:
+      - edge_alcada
+      - alcada_internal
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 200
+    mem_limit: 1g
+    cpus: 1.0
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:'+(process.env.PORT||3000)+'/').then(r=>process.exit(r.status<500?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      start_period: 45s
+      retries: 3
+
+volumes:
+  alcada_mysql_data:
