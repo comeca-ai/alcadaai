@@ -1,73 +1,60 @@
-# React + TypeScript + Vite
+# Alçada — Governança de Desconto
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+> O desconto agora tem dono.
 
-Currently, two official plugins are available:
+Plataforma para empresas com time comercial: a IA calcula o preço da proposta a partir do **custo real dos cargos**, cada vendedor tem uma **faixa de desconto que aprova sozinho**, e acima dela o sistema exige **alçada** do gerente/diretor. Kanban com **gate de evidência**: sem prova, o card não passa de fase.
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) (or [oxc](https://oxc.rs) when used in [rolldown-vite](https://vite.dev/guide/rolldown)) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
+**Produção:** vitrine https://alcada.ia.br/ · app https://app.alcada.ia.br/
 
-## React Compiler
+**Stack:** React 19 + Vite + TypeScript + Tailwind + shadcn/ui · Hono + tRPC 11 · Drizzle ORM + MySQL 8 · Docker
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+---
 
-## Expanding the ESLint configuration
+## O que tem no v0
 
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
+| Tela | Rota | O que faz |
+|---|---|---|
+| Nova proposta | `/nova` | composição de cargos × quantidades → preço da IA (custo × margem × urgência) → barra de alçada viva (verde/âmbar/vermelho + piso) → registrar ou pedir alçada |
+| Kanban | `/kanban` | 4 fases (Dados → Elaborando → Revisão & Alçada → Enviar), passaporte de evidências por card, avanço com gate **server-side** |
+| Minhas propostas | `/minhas` | pipeline com semáforo de desvio e KPIs do vendedor |
+| Painel do diretor | `/diretor` | fila de alçadas, aprovar/devolver, margem em risco, leaderboard de desvio |
 
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
+## Arquitetura
 
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
-
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```
+React (src/) ──tRPC──▶ Hono (api/) ──Drizzle──▶ MySQL
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+- `db/schema.ts` — `cargos`, `usuarios`, `propostas`, `alcadas`, `eventos` (audit trail)
+- `api/queries/ops.ts` — motor de preço (piso = custo ÷ (1 − margem)), zonas de alçada, gate de evidências do kanban
+- `api/router.ts` — routers: `cargos`, `usuarios`, `preco.calcular`, `propostas`, `alcada`, `kanban.avancar`, `eventos`
+- `db/seed.ts` — tenant demo "Vetta Facilities" (4 cargos, 3 usuários, 4 propostas em vários estados)
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
+## Rodar local
 
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```bash
+pnpm install
+pnpm db:push        # precisa de DATABASE_URL no .env
+node node_modules/.pnpm/tsx@*/node_modules/tsx/dist/cli.mjs db/seed.ts
+pnpm dev            # http://localhost:3000
 ```
+
+## Deploy (VPS central, padrão Docker + Caddy)
+
+```bash
+docker build -t alcada:<tag> .                                    # imagem (build com pnpm)
+docker build --target build -t alcada-build:<tag> .               # imagem de setup (migrações/seed)
+cd /srv/apps/alcada && docker compose --env-file release.env up -d
+```
+
+- Segredos em `mysql.env` / `release.env` (gitignored — ver `deploy/*.example`)
+- Site no Caddy central: `deploy` segue INFRA.md — mTLS + Origin CA da zona
+- DNS: `A @`, `A app` → IP do host, proxy laranja, Full (strict), AOP ON
+
+## Pendências (roadmap)
+
+- [ ] Auth real (graft `--features auth`)
+- [ ] WhatsApp: alçada aprovável direto na conversa (Evolution API)
+- [ ] Diff do documento final (three-way match)
+- [ ] Relatório "Por Que Damos Desconto" + Termômetro público
+- [ ] Multi-tenant de verdade (hoje: 1 tenant seed)
